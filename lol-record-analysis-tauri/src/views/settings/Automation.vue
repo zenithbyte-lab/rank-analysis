@@ -23,6 +23,29 @@
           </span>
           <n-switch v-model:value="autoStart" @update:value="updateStartSwitch" />
         </div>
+
+        <div class="setting-item">
+          <span class="setting-label">
+            <n-icon size="20" class="setting-item-icon setting-item-icon-horse">
+              <ChatbubbleEllipsesOutline />
+            </n-icon>
+            <span class="setting-label-col">
+              <span>自动发送队伍马评级</span>
+              <span class="setting-hint">选人阶段向聊天发送己方全队（含队友）马评级</span>
+            </span>
+          </span>
+          <n-switch v-model:value="autoSendHorse" @update:value="updateSendHorseSwitch" />
+        </div>
+
+        <div v-if="autoSendHorse" class="setting-item setting-item-nested">
+          <span class="setting-label">
+            <span class="setting-label-col">
+              <span>同时发送自己</span>
+              <span class="setting-hint">关闭后只发队友，不发自己的评级</span>
+            </span>
+          </span>
+          <n-switch v-model:value="sendSelfHorse" @update:value="updateSendSelfHorseSwitch" />
+        </div>
       </n-space>
     </n-card>
 
@@ -209,7 +232,13 @@
 import { VueDraggable } from 'vue-draggable-plus'
 import { onMounted, ref } from 'vue'
 import { renderSingleSelectTag, renderLabel, filterChampionFunc } from '@renderer/utils/champion'
-import { CheckmarkCircleOutline, FlashOutline, Close, PlayCircleOutline } from '@vicons/ionicons5'
+import {
+  CheckmarkCircleOutline,
+  FlashOutline,
+  Close,
+  PlayCircleOutline,
+  ChatbubbleEllipsesOutline
+} from '@vicons/ionicons5'
 import { getConfigByIpc, putConfigByIpc } from '@renderer/services/ipc'
 import { assetPrefix } from '@renderer/services/http'
 import type { championOption } from '@renderer/types/domain/champion'
@@ -235,6 +264,10 @@ onMounted(async () => {
   myPickData.value = (await getConfigByIpc<number[]>('settings.auto.pickChampionSlice')) ?? []
   myBanData.value = (await getConfigByIpc<number[]>('settings.auto.banChampionSlice')) ?? []
   autoStart.value = (await getConfigByIpc<boolean>('settings.auto.startMatchSwitch')) ?? false
+  autoSendHorse.value = (await getConfigByIpc<boolean>('settings.auto.sendHorseSwitch')) ?? false
+  // 默认发送自己的评级（与 hh-lol-prophet ShouldSendSelfHorse 默认 true 一致）
+  sendSelfHorse.value =
+    (await getConfigByIpc<boolean>('settings.auto.sendSelfHorseSwitch')) ?? true
   await reloadPickRules()
   await reloadBanRules()
 })
@@ -313,6 +346,8 @@ const autoAccept = ref(false)
 const autoPick = ref(false)
 const autoBan = ref(false)
 const autoStart = ref(false)
+const autoSendHorse = ref(false)
+const sendSelfHorse = ref(true)
 
 const selectPickChampionId = ref(null)
 const selectBanChampionId = ref(null)
@@ -338,6 +373,12 @@ const updateBanData = async () => {
 }
 const updateStartSwitch = async () => {
   await putConfigByIpc('settings.auto.startMatchSwitch', autoStart.value)
+}
+const updateSendHorseSwitch = async () => {
+  await putConfigByIpc('settings.auto.sendHorseSwitch', autoSendHorse.value)
+}
+const updateSendSelfHorseSwitch = async () => {
+  await putConfigByIpc('settings.auto.sendSelfHorseSwitch', sendSelfHorse.value)
 }
 
 const deleteBanData = async (value: any) => {
@@ -400,6 +441,24 @@ const addPickData = async (value: any) => {
 }
 .setting-item-icon-start {
   color: #5ca3ea;
+}
+.setting-item-icon-horse {
+  color: #f0a020;
+}
+.setting-item-nested {
+  padding-left: 28px;
+  opacity: 0.95;
+}
+.setting-label-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.setting-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary, #888);
+  line-height: 1.3;
 }
 
 .icon {

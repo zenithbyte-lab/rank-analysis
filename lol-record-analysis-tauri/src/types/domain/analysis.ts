@@ -134,14 +134,25 @@ export function defaultRecentData(): RecentData {
   }
 }
 
+/** 上等马评分（hh-lol-prophet 兼容算法） */
+export interface HorseScore {
+  score: number
+  horse: string
+  good: boolean
+  recentKda: string
+}
+
 export interface UserTag {
   recentData: RecentData
   tag: RankTag[]
+  /** 马评级，战绩为空时可能缺失 */
+  horse?: HorseScore | null
 }
 
 export function defaultUserTag(): UserTag {
   return {
     recentData: defaultRecentData(),
-    tag: []
+    tag: [],
+    horse: null
   }
 }

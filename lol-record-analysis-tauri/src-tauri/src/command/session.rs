@@ -777,6 +777,7 @@ async fn process_subteam_parallel(
                             one_game_players_map: None,
                         },
                         tag: Vec::new(),
+                        horse: None,
                     });
 
             SessionSummoner {

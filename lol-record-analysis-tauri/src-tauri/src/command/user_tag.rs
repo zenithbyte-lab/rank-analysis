@@ -215,6 +215,7 @@ pub struct RecentData {
 ///
 /// - `recent_data`: 近期统计数据
 /// - `tag`: 标签列表
+/// - `horse`: 上等马评分（可选，战绩为空时为 None）
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UserTag {
@@ -222,6 +223,9 @@ pub struct UserTag {
     pub recent_data: RecentData,
     /// 标签列表
     pub tag: Vec<RankTag>,
+    /// 上等马 / 中等马 / 下等马 评分（hh-lol-prophet 兼容算法）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horse: Option<crate::horse_score::HorseScore>,
 }
 
 /// 根据召唤师名称获取用户标签。
@@ -339,6 +343,29 @@ pub async fn get_user_tag_by_puuid(
         .unwrap_or(&"未知模式")
         .to_string();
 
+    // 上等马评分：基于同一份已 enrich 的战绩
+    let horse = Some(crate::horse_score::calc_horse_score(&match_history, puuid));
+
+    // 把马评级作为系统标签插入最前，方便现有 UnifiedTagRow 直接展示
+    if let Some(ref h) = horse {
+        tags.insert(
+            0,
+            RankTag {
+                good: h.good,
+                tag_name: h.horse.clone(),
+                tag_desc: format!(
+                    "马评分 {:.0}（hh-lol-prophet 算法）\n最近KDA: {}",
+                    h.score,
+                    if h.recent_kda.is_empty() {
+                        "无"
+                    } else {
+                        &h.recent_kda
+                    }
+                ),
+            },
+        );
+    }
+
     let mut user_tag = UserTag {
         recent_data: RecentData {
             kda,
@@ -358,6 +385,7 @@ pub async fn get_user_tag_by_puuid(
             one_game_players_map: Some(one_game_player_map.clone()),
         },
         tag: tags,
+        horse,
     };
 
     // 计算朋友组队胜率和冤家组队胜率

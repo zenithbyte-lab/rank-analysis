@@ -102,6 +102,21 @@ pub struct Stats {
     #[serde(rename = "damageDealtToTurrets", default)]
     pub damage_dealt_to_turrets: i32,
 
+    // 以下字段用于「上等马」评分（hh-lol-prophet 兼容算法）。
+    // LCU / SGP 可能缺省，统一 default=0 / false，避免反序列化失败。
+    #[serde(rename = "firstBloodKill", default)]
+    pub first_blood_kill: bool,
+    #[serde(rename = "firstBloodAssist", default)]
+    pub first_blood_assist: bool,
+    #[serde(rename = "pentaKills", default)]
+    pub penta_kills: i32,
+    #[serde(rename = "quadraKills", default)]
+    pub quadra_kills: i32,
+    #[serde(rename = "tripleKills", default)]
+    pub triple_kills: i32,
+    #[serde(rename = "visionScore", default)]
+    pub vision_score: i32,
+
     // Calculated data - if these are derived and not directly in JSON,
     // you might not include them in the struct for deserialization,
     // or make them Option<i32> if they might be missing.

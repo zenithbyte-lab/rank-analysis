@@ -132,6 +132,25 @@
             </div>
 
             <div class="profile-tags">
+              <n-popover v-if="horseLabel" trigger="hover">
+                <template #trigger>
+                  <n-tag
+                    size="small"
+                    round
+                    :type="horseLabel.good ? 'success' : 'error'"
+                    :bordered="false"
+                    class="horse-tag"
+                  >
+                    🐎 {{ horseLabel.horse }}
+                    <span class="horse-score">{{ Math.round(horseLabel.score) }}</span>
+                  </n-tag>
+                </template>
+                <div class="horse-popover">
+                  <div>马评分：{{ horseLabel.score.toFixed(1) }}</div>
+                  <div v-if="horseLabel.recentKda">最近KDA：{{ horseLabel.recentKda }}</div>
+                  <div class="horse-hint">算法兼容 hh-lol-prophet（上等马/中等马/下等马）</div>
+                </div>
+              </n-popover>
               <n-tag
                 v-if="sessionSummoner.preGroupMarkers?.name"
                 size="small"
@@ -146,7 +165,7 @@
                 </n-popover>
               </n-tag>
               <UnifiedTagRow
-                :tags="sessionSummoner?.userTag?.tag || []"
+                :tags="nonHorseTags"
                 :puuid="sessionSummoner.summoner.puuid"
                 :game-name="sessionSummoner.summoner.gameName"
                 :tag-line="sessionSummoner.summoner.tagLine"
@@ -212,6 +231,19 @@ const isHiddenRecord = computed(
   () =>
     !!props.sessionSummoner.championId &&
     (!props.sessionSummoner.summoner?.gameName || !props.sessionSummoner.summoner?.puuid)
+)
+
+/** 马评级：优先用结构化 horse 字段，兼容仅写入 tag 的情况 */
+const horseLabel = computed(() => {
+  const horse = props.sessionSummoner?.userTag?.horse
+  if (horse && horse.horse) return horse
+  return null
+})
+
+/** 系统标签里去掉马评级（已由 horse-tag 单独展示，避免重复） */
+const HORSE_NAMES = new Set(['通天代', '小代', '上等马', '中等马', '下等马', '牛马'])
+const nonHorseTags = computed(
+  () => (props.sessionSummoner?.userTag?.tag || []).filter((t) => !HORSE_NAMES.has(t.tagName))
 )
 
 const { isAramMode, balanceTags, overallBalanceStatus } = useAramBalance(
@@ -396,6 +428,29 @@ const { isAramMode, balanceTags, overallBalanceStatus } = useAramBalance(
   justify-content: flex-end;
   align-items: center;
   padding-left: var(--space-8);
+}
+
+.horse-tag {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.horse-score {
+  margin-left: 4px;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.horse-popover {
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 240px;
+}
+
+.horse-hint {
+  margin-top: 4px;
+  opacity: 0.65;
+  font-size: 11px;
 }
 
 .copy-btn {

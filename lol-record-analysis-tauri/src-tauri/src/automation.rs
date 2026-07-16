@@ -5,6 +5,7 @@
 //! - 自动开始寻找对局
 //! - 自动选择英雄
 //! - 自动禁用英雄
+//! - 自动发送队伍马评级到选人聊天
 //!
 //! # 架构
 //!
@@ -34,11 +35,15 @@ use tokio::time::interval;
 
 use crate::config::{extract_bool, get_config, register_on_change_callback, Value};
 use crate::constant::game::{CHAMPSELECT, LOBBY, MATCHMAKING, READYCHECK};
+use crate::horse_score::calc_horse_score;
 use crate::lcu::api::champion_select::{
     get_champion_select_session, patch_session_action, post_accept_match,
 };
+use crate::lcu::api::chat::{get_champ_select_conversation_id, send_conversation_msg};
 use crate::lcu::api::lobby::Lobby;
+use crate::lcu::api::match_history::MatchHistory;
 use crate::lcu::api::phase::get_phase;
+use crate::lcu::api::summoner::Summoner;
 
 /// 全局自动化管理器实例
 ///
@@ -659,21 +664,29 @@ async fn start_select_champion_slice_fallback(
         }
     }
 
+    // 没有可用英雄时直接跳过：不要 fallback 到 champion_id=1（火女 Annie）。
+    // 以前列表为空或全部被 ban/被队友选走时会强制锁火女，这是用户报告的 bug。
     let will_select_champion_id = if my_pick_champion_slice.is_empty() {
-        log::warn!("No champions configured in pickChampionSlice, using default ID: 1");
-        1
+        log::warn!("No champions configured in pickChampionSlice, skip auto-pick");
+        return Ok(());
     } else {
-        let selected = my_pick_champion_slice
+        match my_pick_champion_slice
             .iter()
             .find(|&&champion_id| !not_select_champion_ids.contains_key(&champion_id))
             .copied()
-            .unwrap_or(1);
-        if selected != 1 {
-            log::info!("Will select champion ID: {}", selected);
-        } else {
-            log::warn!("No available champion to select, using default ID: 1");
+        {
+            Some(selected) => {
+                log::info!("Will select champion ID: {}", selected);
+                selected
+            }
+            None => {
+                log::warn!(
+                    "All configured champions are banned or taken {:?}, skip auto-pick (no Annie fallback)",
+                    my_pick_champion_slice
+                );
+                return Ok(());
+            }
         }
-        selected
     };
 
     // 查找我的选择动作
@@ -951,21 +964,28 @@ async fn start_ban_champion_slice_fallback(
         not_ban_champion_ids.keys().collect::<Vec<_>>()
     );
 
+    // 没有可用禁用目标时跳过，不要 fallback 到 champion_id=1（火女）。
     let will_ban_champion_id = if my_ban_champion_slice.is_empty() {
-        log::warn!("No champions configured in banChampionSlice, using default ID: 1");
-        1
+        log::warn!("No champions configured in banChampionSlice, skip auto-ban");
+        return Ok(());
     } else {
-        let selected = my_ban_champion_slice
+        match my_ban_champion_slice
             .iter()
             .find(|&&champion_id| !not_ban_champion_ids.contains_key(&champion_id))
             .copied()
-            .unwrap_or(1);
-        if selected != 1 {
-            log::info!("Will ban champion ID: {}", selected);
-        } else {
-            log::warn!("No available champion to ban, using default ID: 1");
+        {
+            Some(selected) => {
+                log::info!("Will ban champion ID: {}", selected);
+                selected
+            }
+            None => {
+                log::warn!(
+                    "All configured ban targets unavailable {:?}, skip auto-ban (no Annie fallback)",
+                    my_ban_champion_slice
+                );
+                return Ok(());
+            }
         }
-        selected
     };
 
     // 查找我的ban动作
@@ -1001,6 +1021,183 @@ async fn start_ban_champion_slice_fallback(
     Ok(())
 }
 
+/// 自动发送队伍马评级到选人聊天。
+///
+/// 进入 `CHAMPSELECT` 后延迟数秒，拉取己方队伍每位玩家的战绩并计算马评分，
+/// 按分数从高到低发到选人聊天室（格式兼容 hh-lol-prophet）。
+///
+/// 同一会话只发送一次（按 conversation id 去重）。
+///
+/// # 配置
+///
+/// - `settings.auto.sendHorseSwitch`: 主开关
+/// - `settings.auto.sendSelfHorseSwitch`: 是否发送自己的评级（默认 true）
+async fn start_send_horse_automation() {
+    log::info!("Starting send-horse automation");
+    let mut ticker = interval(Duration::from_secs(2));
+    // 已成功发送过的 conversation id，避免同一局重复刷屏
+    let mut sent_conversation_id: Option<String> = None;
+    // 离开选人后清空，允许下一局再发
+    let mut was_in_champ_select = false;
+
+    loop {
+        ticker.tick().await;
+
+        let cur_phase = match get_phase().await {
+            Ok(phase) => phase,
+            Err(e) => {
+                log::error!("Get phase error (send horse): {}", e);
+                continue;
+            }
+        };
+
+        if cur_phase != CHAMPSELECT {
+            if was_in_champ_select {
+                log::info!("Left champion select, reset send-horse state");
+                sent_conversation_id = None;
+                was_in_champ_select = false;
+            }
+            continue;
+        }
+        was_in_champ_select = true;
+
+        let conversation_id = match get_champ_select_conversation_id().await {
+            Ok(id) => id,
+            Err(e) => {
+                log::debug!("Champ select conversation not ready: {}", e);
+                continue;
+            }
+        };
+
+        if sent_conversation_id.as_ref() == Some(&conversation_id) {
+            continue;
+        }
+
+        // 进入选人后稍等，等队友都进房、会话稳定（与 prophet 默认延迟类似）
+        log::info!(
+            "Champ select conversation ready ({}), waiting before send horse",
+            conversation_id
+        );
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // 再次确认仍在选人且会话未变
+        match get_phase().await {
+            Ok(p) if p == CHAMPSELECT => {}
+            _ => continue,
+        }
+        let conversation_id = match get_champ_select_conversation_id().await {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        match send_team_horse_messages(&conversation_id).await {
+            Ok(()) => {
+                log::info!("Team horse messages sent for conversation {}", conversation_id);
+                sent_conversation_id = Some(conversation_id);
+            }
+            Err(e) => {
+                // 失败不标记，下次 tick 可重试（例如战绩接口短暂失败）
+                log::error!("Send team horse failed: {}", e);
+            }
+        }
+    }
+}
+
+/// 计算己方队伍每位玩家的马评级并发送到选人聊天。
+///
+/// 消息格式（兼容 hh-lol-prophet）：
+/// `上等马(125): 召唤师名#标签 5-2-8  3-4-10 ...`
+async fn send_team_horse_messages(conversation_id: &str) -> Result<(), String> {
+    let select_session = get_champion_select_session().await?;
+    if select_session.my_team.is_empty() {
+        return Err("my_team is empty".to_string());
+    }
+
+    let my_summoner = Summoner::get_my_summoner().await.ok();
+    let my_puuid = my_summoner.as_ref().map(|s| s.puuid.as_str());
+
+    // 默认发送自己；配置显式关闭时跳过
+    let send_self = match get_config("settings.auto.sendSelfHorseSwitch").await {
+        Ok(v) => extract_bool(&v).unwrap_or(true),
+        Err(_) => true,
+    };
+
+    // 收集 (score, msg)，按分数降序发送
+    let mut rows: Vec<(f64, String)> = Vec::new();
+
+    for player in &select_session.my_team {
+        if player.puuid.is_empty() {
+            continue;
+        }
+        if !send_self && my_puuid == Some(player.puuid.as_str()) {
+            continue;
+        }
+
+        let summoner = match Summoner::get_summoner_by_puuid(&player.puuid).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("get summoner {} failed: {}", player.puuid, e);
+                continue;
+            }
+        };
+
+        let display_name = if summoner.game_name.is_empty() {
+            player.puuid.chars().take(8).collect::<String>()
+        } else {
+            format!("{}#{}", summoner.game_name, summoner.tag_line)
+        };
+
+        let mut match_history =
+            match MatchHistory::get_match_history_by_puuid(&player.puuid, 0, 19).await {
+                Ok(mh) => mh,
+                Err(e) => {
+                    log::warn!("match history for {} failed: {}", display_name, e);
+                    let msg = format!("未查询到战绩(0): {}", display_name);
+                    rows.push((0.0, msg));
+                    continue;
+                }
+            };
+
+        if let Err(e) = match_history.enrich_game_detail().await {
+            log::warn!("enrich game detail for {} failed: {}", display_name, e);
+        }
+
+        let horse = calc_horse_score(&match_history, &player.puuid);
+        let kda = horse.recent_kda.replace('/', "-");
+        let msg = if horse.recent_kda.is_empty() {
+            format!("未查询到战绩({}): {}", horse.score as i32, display_name)
+        } else {
+            format!(
+                "{}({}): {} {}",
+                horse.horse,
+                horse.score as i32,
+                display_name,
+                kda
+            )
+        };
+        rows.push((horse.score, msg));
+    }
+
+    if rows.is_empty() {
+        return Err("no horse rows to send".to_string());
+    }
+
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (i, (_score, msg)) in rows.iter().enumerate() {
+        log::info!("Sending horse msg: {}", msg);
+        if let Err(e) = send_conversation_msg(conversation_id, msg).await {
+            return Err(format!("send msg failed: {}", e));
+        }
+        // LCU 聊天限流：与 prophet 一致约 2.1s
+        if i + 1 < rows.len() {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+        }
+    }
+
+    Ok(())
+}
+
 /// 初始化并启动自动化任务。
 ///
 /// 根据配置文件中的开关状态启动对应的自动化任务。
@@ -1011,6 +1208,7 @@ async fn start_ban_champion_slice_fallback(
 /// - `accept_match`: 自动接受匹配（`settings.auto.acceptMatchSwitch`）
 /// - `ban_champion`: 自动禁用英雄（`settings.auto.banChampionSwitch`）
 /// - `pick_champion`: 自动选择英雄（`settings.auto.pickChampionSwitch`）
+/// - `send_horse`: 自动发送马评级（`settings.auto.sendHorseSwitch`）
 ///
 /// # 配置格式
 ///
@@ -1073,6 +1271,19 @@ async fn init_run_automation() {
         }
     }
 
+    match get_config("settings.auto.sendHorseSwitch").await {
+        Ok(value) => {
+            log::info!("Auto-send horse config value: {:?}", value);
+            if let Some(true) = extract_bool(&value) {
+                log::info!("Auto-send horse is enabled, starting task");
+                manager.start_task("send_horse", start_send_horse_automation());
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to get sendHorseSwitch config: {}", e);
+        }
+    }
+
     log::info!("Automation tasks initialization completed");
 }
 
@@ -1091,6 +1302,7 @@ async fn init_run_automation() {
 /// - `settings.auto.acceptMatchSwitch`: 自动接受匹配
 /// - `settings.auto.pickChampionSwitch`: 自动选择英雄
 /// - `settings.auto.banChampionSwitch`: 自动禁用英雄
+/// - `settings.auto.sendHorseSwitch`: 自动发送队伍马评级
 ///
 /// # 使用示例
 ///
@@ -1175,6 +1387,19 @@ pub async fn start_automation() {
                     }
                 } else {
                     log::warn!("Invalid value for banChampionSwitch: {:?}", new_value);
+                }
+            }
+            "settings.auto.sendHorseSwitch" => {
+                if let Some(enabled) = extract_bool(new_value) {
+                    if enabled {
+                        log::info!("Config: Enabling send-horse automation");
+                        manager.start_task("send_horse", start_send_horse_automation());
+                    } else {
+                        log::info!("Config: Disabling send-horse automation");
+                        manager.stop_task("send_horse");
+                    }
+                } else {
+                    log::warn!("Invalid value for sendHorseSwitch: {:?}", new_value);
                 }
             }
             _ => {
